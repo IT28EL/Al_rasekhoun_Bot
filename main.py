@@ -1,186 +1,300 @@
-
-import time
-import asyncio
+# bot.py
 import os
-from flask import Flask
-from threading import Thread
-from telegram import ReplyKeyboardMarkup, Update, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from supabase import create_client, Client
+import json
+import logging
+from typing import Dict, List, Optional
+from datetime import datetime
 
-# --- 1. إعدادات Flask للنبض (Heartbeat) ---
-app = Flask('')
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters
+)
+from telegram.constants import ParseMode
 
-@app.route('/')
-def home():
-    return "بوت الرّاسخون في العلم: الحالة (سحابي متطور) ✅"
+# Configure logging
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def run_flask():
-    app.run(host='0.0.0.0', port=8080)
+# Configuration
+TELEGRAM_TOKEN = os.getenv('8287845380:AAEALQaBW_wdQ72MSdtbbukwvP3YsXTbSkc', '7833080290')  # Replace with your bot token
+RESOURCE_GROUP_LINK = "https://t.me/Al_rasekhoun"
 
-def keep_alive():
-    t = Thread(target=run_flask)
-    t.start()
+SUBJECTS = ['Mathematics', 'Physics', 'Chemistry', 'Biology', 'Computer Science', 'English', 'History']
+GRADES = ['9', '10', '11', '12']
+RESOURCE_TYPES = ['Textbook', 'Link', 'Cheatsheet', 'Video']
+ADMIN_ID = 7669890509
 
-# --- 2. الإعدادات والربط ---
-SUPABASE_URL = "https://dnjwfulyobufwdqezktd.supabase.co"
-SUPABASE_KEY = "sb_publishable_As6dVjy3l11aIB3zvMJbbQ_R4gqRmfr"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Conversation states
+(CHOOSE_SUBJECT, CHOOSE_GRADE, CHOOSE_TYPE, 
+ INPUT_TITLE, INPUT_CONTENT) = range(5)
 
-TOKEN = '8287845380:AAEALQaBW_wdQ72MSdtbbukwvP3YsXTbSkc'
-ADMIN_ID = 7833080290 
-FILES_CHANNEL_ID = -1004297648771  # آيدي قناتك الخاصة
+# Database class
+class Database:
+    def __init__(self, filename: str = 'resources.json'):
+        self.filename = filename
+        self.data = self._load_data()
 
-# --- 3. الحماية من السبام ---
-user_last_action = {}
-def is_spamming(user_id):
-    current_time = time.time()
-    last_time = user_last_action.get(user_id, 0)
-    if current_time - last_time < 0.8:
-        return True
-    user_last_action[user_id] = current_time
-    return False
+    def _load_data(self) -> Dict:
+        try:
+            with open(self.filename, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {'resources': [], 'stats': {'accesses': 0}}
 
-# --- 4. بناء القوائم السحابية ---
-def get_main_keyboard(parent_id, is_admin=False):
-    p_id = parent_id if parent_id else 0
-    query = supabase.table("content").select("title, type").eq("parent_id", p_id).execute()
-    items = query.data
+    def _save_data(self):
+        with open(self.filename, 'w') as f:
+            json.dump(self.data, f, indent=4)
+
+    def add_resource(self, resource: Dict) -> bool:
+        try:
+            resource['added_at'] = datetime.utcnow().isoformat()
+            self.data['resources'].append(resource)
+            self._save_data()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to add resource: {e}")
+            return False
+
+    def get_resources(self, subject: str, grade: str, type: str) -> List[Dict]:
+        self.data['stats']['accesses'] += 1
+        self._save_data()
+        return [r for r in self.data['resources'] 
+                if r['subject'] == subject and 
+                r['grade'] == grade and 
+                r['type'] == type]
+
+    def get_stats(self) -> Dict:
+        return self.data['stats']
+
+# Utility functions
+def create_keyboard(items: List[str], prefix: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(item, callback_data=f"{prefix}_{item}")] 
+        for item in items
+    ])
+
+def format_resource(resource: Dict) -> str:
+    type_emojis = {'Textbook': '📚', 'Cheatsheet': '📝', 'Video': '🎥', 'Link': '🔗'}
+    emoji = type_emojis.get(resource['type'], '📎')
     
-    keyboard = []
-    temp_row = []
-    for item in items:
-        prefix = "📁 " if item['type'] == 'folder' else "📍 "
-        temp_row.append(f"{prefix}{item['title']}")
-        if len(temp_row) == 2:
-            keyboard.append(temp_row)
-            temp_row = []
-    if temp_row: keyboard.append(temp_row)
-    
-    if is_admin:
-        if p_id == 0:
-            keyboard.append(["📊 الإحصائيات", "📢 إرسال جماعي"])
-        keyboard.append(["➕ إضافة محتوى", "🗑 حذف عنصر"])
-    
-    if p_id != 0:
-        keyboard.append(["🔙 العودة", "🏠 الرئيسية"])
-        
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-
-# --- 5. منطق عمل البوت المطور ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if is_spamming(user_id): return
-    
-    # تسجيل المستخدم سحابياً
-    supabase.table("users").upsert({"id": user_id}).execute()
-    
-    context.user_data['path'] = []
-    await update.message.reply_text(
-        "مرحباً بك في منصة الرّاسخون في العلم 🎓\n(النظام السحابي المطور)",
-        reply_markup=get_main_keyboard(None, user_id == ADMIN_ID)
+    return (
+        f"{emoji} <b>{resource['title']}</b> {emoji}\n"
+        f"📘 Subject: {resource['subject']}\n"
+        f"📋 Grade: {resource['grade']}\n"
+        f"📎 Type: {resource['type']}\n"
+        f"🔗 <a href='{resource['content']}'>Access Resource</a>"
     )
 
-async def handle_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    if is_spamming(user_id): return
+def is_valid_link(content: str) -> bool:
+    return any(fmt in content for fmt in ['https://t.me/', 't.me/'])
+
+def is_admin(user_id: int) -> bool:
+    return user_id == ADMIN_ID
+
+# Command handlers
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "🎓 Welcome to Educational Resources Bot!\n"
+        "Use /browse to find resources\n"
+        "Use /add to share resources (admin only)\n"
+        "Use /stats to see usage stats",
+        parse_mode=ParseMode.HTML
+    )
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    stats = db.get_stats()
+    await update.message.reply_text(
+        f"📊 Stats\nTotal accesses: {stats['accesses']}",
+        parse_mode=ParseMode.HTML
+    )
+
+# Browse conversation handlers
+async def browse_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "Select a subject:",
+        reply_markup=create_keyboard(SUBJECTS, "subject"),
+        parse_mode=ParseMode.HTML
+    )
+    return CHOOSE_SUBJECT
+
+async def browse_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['subject'] = query.data.split('_')[1]
+    await query.edit_message_text(
+        "Select a grade:",
+        reply_markup=create_keyboard(GRADES, "grade")
+    )
+    return CHOOSE_GRADE
+
+async def browse_grade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['grade'] = query.data.split('_')[1]
+    await query.edit_message_text(
+        "Select resource type:",
+        reply_markup=create_keyboard(RESOURCE_TYPES, "type")
+    )
+    return CHOOSE_TYPE
+
+async def browse_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    type_ = query.data.split('_')[1]
     
-    is_admin = (user_id == ADMIN_ID)
-    path = context.user_data.get('path', [])
-    curr_parent = path[-1] if path else 0
-
-    # --- ميزة الإحصائيات ---
-    if is_admin and text == "📊 الإحصائيات":
-        u_count = supabase.table("users").select("id", count="exact").execute().count
-        top_content = supabase.table("content").select("title, visits").neq("type", "folder").order("visits", desc=True).limit(5).execute().data
-        res = f"👥 المشتركين: {u_count}\n\n🔝 الأكثر زيارة:\n"
-        for item in top_content:
-            res += f"- {item['title']}: ({item.get('visits', 0)} زيارة)\n"
-        await update.message.reply_text(res)
-        return
-
-    # --- ميزة الإرسال الجماعي ---
-    if is_admin and text == "📢 إرسال جماعي":
-        await update.message.reply_text("أرسل رسالة التعميم الآن:")
-        context.user_data['mode'] = 'broadcast'
-        return
-
-    if is_admin and context.user_data.get('mode') == 'broadcast':
-        users = supabase.table("users").select("id").execute().data
-        count = 0
-        for u in users:
-            try:
-                await context.bot.send_message(chat_id=u['id'], text=f"📢 تنبيه من الرّاسخون في العلم:\n\n{text}")
-                count += 1
-            except: continue
-        await update.message.reply_text(f"✅ تم الإرسال لـ {count} مشترك.")
-        context.user_data['mode'] = None
-        return
-
-    # --- التنقل ---
-    if text == "🔙 العودة":
-        if path: path.pop()
-        await update.message.reply_text("رجوع..", reply_markup=get_main_keyboard(path[-1] if path else None, is_admin))
-        return
-    if text == "🏠 الرئيسية":
-        path.clear()
-        await update.message.reply_text("القائمة الرئيسية", reply_markup=get_main_keyboard(None, is_admin))
-        return
-
-    # --- إضافة المحتوى (سحابي + توجيه للقناة) ---
-    if is_admin and text == "➕ إضافة محتوى":
-        await update.message.reply_text("أرسل: `قسم | الاسم` أو `رابط | الاسم | الرابط` أو أرسل ملفاً.")
-        context.user_data['mode'] = 'adding'
-        return
-
-    if is_admin and context.user_data.get('mode') == 'adding':
-        if text and "|" in text:
-            p = text.split("|")
-            m_type = p[0].strip()
-            if m_type == "قسم":
-                supabase.table("content").insert({"parent_id": curr_parent, "title": p[1].strip(), "type": "folder"}).execute()
-            elif m_type == "رابط":
-                supabase.table("content").insert({"parent_id": curr_parent, "title": p[1].strip(), "type": "url", "file_id": p[2].strip()}).execute()
-            await update.message.reply_text("✅ تم الحفظ سحابياً.")
-            context.user_data['mode'] = None
-        elif update.message.document or update.message.photo or update.message.video:
-            # توجيه للقناة الخاصة
-            await update.message.forward(chat_id=FILES_CHANNEL_ID)
-            
-            f_id = update.message.document.file_id if update.message.document else (update.message.video.file_id if update.message.video else update.message.photo[-1].file_id)
-            title = update.message.caption or "ملف بدون عنوان"
-            supabase.table("content").insert({"parent_id": curr_parent, "title": title, "type": "file", "file_id": f_id}).execute()
-            await update.message.reply_text("✅ تم حفظ الملف سحابياً وتوجيهه للقناة.")
-            context.user_data['mode'] = None
-        return
-
-    # --- التصفح والزيارات ---
-    if text:
-        clean_text = text.replace("📁 ", "").replace("📍 ", "")
-        query = supabase.table("content").select("*").eq("title", clean_text).eq("parent_id", curr_parent).execute()
+    resources = db.get_resources(
+        context.user_data['subject'],
+        context.user_data['grade'],
+        type_
+    )
+    
+    if not resources:
+        await query.edit_message_text("No resources found!")
+        return ConversationHandler.END
         
-        if query.data:
-            item = query.data[0]
-            new_visits = (item.get('visits', 0) or 0) + 1
-            supabase.table("content").update({"visits": new_visits}).eq("id", item['id']).execute()
-            
-            if item['type'] == 'folder':
-                path.append(item['id'])
-                await update.message.reply_text(f"📁 {clean_text}", reply_markup=get_main_keyboard(item['id'], is_admin))
-            else:
-                if item['type'] == 'url':
-                    await update.message.reply_text(f"🔗 {item['title']}:\n{item['file_id']}")
-                else:
-                    await context.bot.send_document(chat_id=user_id, document=item['file_id'], caption=item['title'])
+    await query.edit_message_text("Found resources:")
+    for resource in resources:
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=format_resource(resource),
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=False
+        )
+    return ConversationHandler.END
 
-# --- 6. التشغيل ---
+# Add conversation handlers
+async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin access required!")
+        return ConversationHandler.END
+        
+    await update.message.reply_text(
+        "Select subject for new resource:",
+        reply_markup=create_keyboard(SUBJECTS, "subject"),
+        parse_mode=ParseMode.HTML
+    )
+    return CHOOSE_SUBJECT
+
+async def add_subject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['subject'] = query.data.split('_')[1]
+    await query.edit_message_text(
+        "Select grade:",
+        reply_markup=create_keyboard(GRADES, "grade")
+    )
+    return CHOOSE_GRADE
+
+async def add_grade(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['grade'] = query.data.split('_')[1]
+    await query.edit_message_text(
+        "Select resource type:",
+        reply_markup=create_keyboard(RESOURCE_TYPES, "type")
+    )
+    return CHOOSE_TYPE
+
+async def add_type(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    context.user_data['type'] = query.data.split('_')[1]
+    await query.edit_message_text("Enter resource title:")
+    return INPUT_TITLE
+
+async def add_title(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['title'] = update.message.text
+    await update.message.reply_text(
+        f"Send the Telegram link to the resource\n(Group: {RESOURCE_GROUP_LINK})"
+    )
+    return INPUT_CONTENT
+
+async def add_content(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    content = update.message.text
+    if not is_valid_link(content):
+        await update.message.reply_text("❌ Invalid Telegram link! Try again:")
+        return INPUT_CONTENT
+
+    resource = {
+        'subject': context.user_data['subject'],
+        'grade': context.user_data['grade'],
+        'type': context.user_data['type'],
+        'title': context.user_data['title'],
+        'content': content
+    }
+    
+    if db.add_resource(resource):
+        await update.message.reply_text(
+            "✅ Resource added successfully!",
+            parse_mode=ParseMode.HTML
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to add resource!",
+            parse_mode=ParseMode.HTML
+        )
+    
+    context.user_data.clear()
+    return ConversationHandler.END
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.clear()
+    await update.message.reply_text("Operation cancelled!")
+    return ConversationHandler.END
+
+# Main function
 def main():
-    keep_alive()
-    application = Application.builder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_logic))
-    application.run_polling(drop_pending_updates=True)
+    if TELEGRAM_TOKEN == 'your-token-here':
+        logger.error("Please set TELEGRAM_TOKEN environment variable")
+        return
 
-if __name__ == '__main__':
+    global db
+    db = Database()
+
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+
+    # Basic commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+
+    # Browse conversation
+    browse_handler = ConversationHandler(
+        entry_points=[CommandHandler("browse", browse_start)],
+        states={
+            CHOOSE_SUBJECT: [CallbackQueryHandler(browse_subject, pattern="^subject_")],
+            CHOOSE_GRADE: [CallbackQueryHandler(browse_grade, pattern="^grade_")],
+            CHOOSE_TYPE: [CallbackQueryHandler(browse_type, pattern="^type_")]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
+    # Add conversation
+    add_handler = ConversationHandler(
+        entry_points=[CommandHandler("add", add_start)],
+        states={
+            CHOOSE_SUBJECT: [CallbackQueryHandler(add_subject, pattern="^subject_")],
+            CHOOSE_GRADE: [CallbackQueryHandler(add_grade, pattern="^grade_")],
+            CHOOSE_TYPE: [CallbackQueryHandler(add_type, pattern="^type_")],
+            INPUT_TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_title)],
+            INPUT_CONTENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_content)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+
+    app.add_handler(browse_handler)
+    app.add_handler(add_handler)
+
+    logger.info("Starting bot...")
+    app.run_polling(allowed_updates=["message", "callback_query"])
+
+if __name__ == "__main__":
     main()

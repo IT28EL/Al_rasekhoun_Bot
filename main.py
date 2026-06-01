@@ -29,7 +29,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 TOKEN = '8287845380:AAEALQaBW_wdQ72MSdtbbukwvP3YsXTbSkc'
 ADMIN_ID = 7833080290 
-
+FILES_CHANNEL_ID = -1004297648771  # آيدي قناتك الخاصة
 # --- 3. الحماية من السبام ---
 user_last_action = {}
 def is_spamming(user_id):
@@ -81,13 +81,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    if is_spamming(user_id): return
-    
-    is_admin = (user_id == ADMIN_ID)
-    path = context.user_data.get('path', [])
-    curr_parent = path[-1] if path else 0
+elif update.message.document or update.message.photo or update.message.video:
+            # السطر الجديد: توجيه الملف للقناة الخاصة لحفظ نسخة هناك
+            await update.message.forward(chat_id=FILES_CHANNEL_ID)
+            
+            # جلب الـ ID لتخزينه سحابياً
+            f_id = update.message.document.file_id if update.message.document else (update.message.video.file_id if update.message.video else update.message.photo[-1].file_id)
+            title = update.message.caption or "ملف بدون عنوان"
+            
+            # حفظ البيانات في السحاب
+            supabase.table("content").insert({"parent_id": curr_parent, "title": title, "type": "file", "file_id": f_id}).execute()
+            await update.message.reply_text("✅ تم حفظ الملف سحابياً وتوجيهه للقناة.")
+            context.user_data['mode'] = None
 
     # --- ميزة الإحصائيات ---
     if is_admin and text == "📊 الإحصائيات":

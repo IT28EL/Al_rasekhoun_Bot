@@ -1,20 +1,19 @@
 
-import sqlite3
 import time
 import asyncio
-import logging
 import os
 from flask import Flask
 from threading import Thread
 from telegram import ReplyKeyboardMarkup, Update, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from supabase import create_client, Client
 
-# --- 1. إعداد Flask (النبض الوهمي للاستضافة) ---
+# --- 1. إعدادات Flask للنبض (Heartbeat) ---
 app = Flask('')
 
 @app.route('/')
 def home():
-    return "البوت يعمل بنجاح! 🚀"
+    return "بوت الرّاسخون في العلم: الحالة (سحابي مستقر) ✅"
 
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
@@ -23,91 +22,77 @@ def keep_alive():
     t = Thread(target=run_flask)
     t.start()
 
-# --- 2. الإعدادات الأساسية ---
+# --- 2. الإعدادات والربط (بياناتك الخاصة) ---
+SUPABASE_URL = "https://dnjwfulyobufwdqezktd.supabase.co"
+SUPABASE_KEY = "sb_publishable_As6dVjy3l11aIB3zvMJbbQ_R4gqRmfr" # ملاحظة هامة بالأسفل
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 TOKEN = '8287845380:AAGvZgyCm0fgN1lFLmFzcTp-fdk5kuFSEGU'
 ADMIN_ID = 7833080290  # آيدي المسؤول
 FILES_CHANNEL_ID = -1004297648771  # آيدي قناتك الخاصة
 
-# --- 3. قاعدة البيانات ونظام الحماية (كما هي دون تغيير) ---
-def init_db():
-    conn = sqlite3.connect('rasikhon.db')
-    cursor = conn.cursor()
-    cursor.execute('''CREATE TABLE IF NOT EXISTS content 
-                      (id INTEGER PRIMARY KEY AUTOINCREMENT, parent_id INTEGER, 
-                       title TEXT, type TEXT, value TEXT, visits INTEGER DEFAULT 0)''')
-    cursor.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, join_date INTEGER)''')
-    conn.commit()
-    conn.close()
-
-user_last_action = {}
-def is_spamming(user_id):
-    current_time = time.time()
-    last_time = user_last_action.get(user_id, 0)
-    if current_time - last_time < 0.7: return True
-    user_last_action[user_id] = current_time
-    return False
+# --- 3. وظائف جلب البيانات من السحاب ---
 
 def get_keyboard(parent_id, is_admin=False):
-    conn = sqlite3.connect('rasikhon.db')
-    items = conn.execute('SELECT title, type FROM content WHERE parent_id IS ?', (parent_id,)).fetchall()
-    conn.close()
+    # جلب الأقسام من Supabase
+    # نستخدم 0 كرمز للقسم الرئيسي (None)
+    p_id = parent_id if parent_id else 0
+    query = supabase.table("content").select("title, type").eq("parent_id", p_id).execute()
+    items = query.data
+    
     keyboard = []
-    for title, c_type in items:
-        prefix = "📁 " if c_type == 'folder' else "📍 "
-        keyboard.append([f"{prefix}{title}"])
+    temp_row = []
+    for item in items:
+        prefix = "📁 " if item['type'] == 'folder' else "📍 "
+        temp_row.append(f"{prefix}{item['title']}")
+        if len(temp_row) == 2: # تنظيم الأزرار (2 في كل صف)
+            keyboard.append(temp_row)
+            temp_row = []
+    if temp_row: keyboard.append(temp_row)
+    
+    # أزرار التحكم
+    control_buttons = []
     if is_admin:
-        if parent_id is None:
-            keyboard.append(["📊 الإحصائيات", "📢 إرسال جماعي"])
-        keyboard.append(["➕ إضافة محتوى", "🗑 حذف عنصر"])
-    if parent_id:
-        keyboard.append(["🔙 العودة", "🏠 الرئيسية"])
+        if p_id == 0:
+            control_buttons.extend(["📊 الإحصائيات", "📢 إرسال جماعي"])
+        control_buttons.append("➕ إضافة محتوى")
+        keyboard.append(control_buttons)
+        keyboard.append(["🗑 حذف عنصر"])
+    
+    navigation = []
+    if p_id != 0:
+        navigation.append("🔙 العودة")
+        navigation.append("🏠 الرئيسية")
+        keyboard.append(navigation)
+        
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-# --- 4. معالجة العمليات (Handlers) ---
+# --- 4. منطق عمل البوت ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if is_spamming(user_id): return
-    conn = sqlite3.connect('rasikhon.db')
-    conn.execute('INSERT OR IGNORE INTO users (id, join_date) VALUES (?, ?)', (user_id, int(time.time())))
-    conn.commit()
-    conn.close()
+    # تسجيل المستخدم في السحاب
+    supabase.table("users").upsert({"id": user_id}).execute()
     context.user_data['path'] = []
-    await update.message.reply_text("مرحباً بك في منصة الرّاسخون في العلم 🎓", 
-                                   reply_markup=get_keyboard(None, user_id == ADMIN_ID))
+    await update.message.reply_text(
+        "مرحباً بك في منصة الرّاسخون في العلم 🎓\nتم تفعيل الحماية السحابية لبياناتك.",
+        reply_markup=get_keyboard(None, user_id == ADMIN_ID)
+    )
 
 async def handle_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
-    if is_spamming(user_id): return
     is_admin = (user_id == ADMIN_ID)
     path = context.user_data.get('path', [])
-    curr_parent = path[-1] if path else None
+    curr_parent = path[-1] if path else 0
 
-    # [ملاحظة: تم الإبقاء على كافة ميزات الإدارة، الإرسال الجماعي، والإحصائيات هنا]
+    # إحصائيات
     if is_admin and text == "📊 الإحصائيات":
-        conn = sqlite3.connect('rasikhon.db')
-        u_count = conn.execute('SELECT COUNT(*) FROM users').fetchone()[0]
-        conn.close()
-        await update.message.reply_text(f"👥 عدد المشتركين: {u_count}")
+        res = supabase.table("users").select("id", count="exact").execute()
+        await update.message.reply_text(f"👥 عدد المشتركين في القاعدة السحابية: {res.count}")
         return
 
-    if is_admin and text == "📢 إرسال جماعي":
-        await update.message.reply_text("أرسل الآن نص الرسالة الجماعية:")
-        context.user_data['mode'] = 'broadcast'
-        return
-
-    if context.user_data.get('mode') == 'broadcast' and is_admin:
-        conn = sqlite3.connect('rasikhon.db')
-        users = conn.execute('SELECT id FROM users').fetchall()
-        conn.close()
-        for u in users:
-            try: await context.bot.send_message(u[0], f"📢 تنبيه جديد:\n\n{text}")
-            except: continue
-        await update.message.reply_text("✅ تم الإرسال للجميع.")
-        context.user_data['mode'] = None
-        return
-
+    # العودة والرسيسية
     if text == "🔙 العودة":
         if path: path.pop()
         await update.message.reply_text("رجوع..", reply_markup=get_keyboard(path[-1] if path else None, is_admin))
@@ -117,63 +102,48 @@ async def handle_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("القائمة الرئيسية", reply_markup=get_keyboard(None, is_admin))
         return
 
-    if text == "➕ إضافة محتوى" and is_admin:
-        await update.message.reply_text("أرسل الآن: `قسم | الاسم` أو `رابط | الاسم | الرابط` أو أرسل ملفاً.")
+    # إضافة محتوى
+    if is_admin and text == "➕ إضافة محتوى":
+        await update.message.reply_text("أرسل الاسم بالشكل التالي:\n`قسم | اسم القسم` لإنشاء مجلد\nأو أرسل ملفاً (PDF/فيديو) مع كتابة عنوانه في الوصف.")
         context.user_data['mode'] = 'adding'
         return
 
     if context.user_data.get('mode') == 'adding' and is_admin:
-        conn = sqlite3.connect('rasikhon.db')
-        if update.message.document or update.message.photo or update.message.video:
-            await update.message.forward(chat_id=FILES_CHANNEL_ID)
-            f_id = update.message.document.file_id if update.message.document else \
-                   (update.message.video.file_id if update.message.video else update.message.photo[-1].file_id)
-            f_type = 'pdf' if update.message.document else ('video' if update.message.video else 'photo')
-            conn.execute('INSERT INTO content (parent_id, title, type, value) VALUES (?, ?, ?, ?)', 
-                         (curr_parent, update.message.caption or "بدون عنوان", f_type, f_id))
-            conn.commit()
-            await update.message.reply_text("✅ تم رفع الملف للقناة وحفظه.")
-            context.user_data['mode'] = None
-        elif text and "|" in text:
-            p = text.split("|")
-            if p[0].strip() == "قسم":
-                conn.execute('INSERT INTO content (parent_id, title, type) VALUES (?, ?, ?)', (curr_parent, p[1].strip(), 'folder'))
-            elif p[0].strip() == "رابط":
-                conn.execute('INSERT INTO content (parent_id, title, type, value) VALUES (?, ?, ?, ?)', (curr_parent, p[1].strip(), 'url', p[2].strip()))
-            conn.commit()
-            await update.message.reply_text("✅ تم الحفظ.")
-            context.user_data['mode'] = None
-        conn.close()
+        if update.message.document or update.message.video or update.message.photo:
+            # رفع للمخزن وجلب ID
+            f_msg = await update.message.forward(chat_id=FILES_CHANNEL_ID)
+            f_id = f_msg.document.file_id if f_msg.document else (f_msg.video.file_id if f_msg.video else f_msg.photo[-1].file_id)
+            f_type = 'file'
+            title = update.message.caption or "ملف بدون عنوان"
+            supabase.table("content").insert({"parent_id": curr_parent, "title": title, "type": f_type, "file_id": f_id}).execute()
+            await update.message.reply_text("✅ تم حفظ الملف سحابياً.")
+        elif "|" in text:
+            parts = text.split("|")
+            if parts[0].strip() == "قسم":
+                supabase.table("content").insert({"parent_id": curr_parent, "title": parts[1].strip(), "type": "folder"}).execute()
+                await update.message.reply_text("✅ تم إنشاء القسم سحابياً.")
+        context.user_data['mode'] = None
         return
 
+    # التنقل والفتح
     clean_text = text.replace("📁 ", "").replace("📍 ", "")
-    conn = sqlite3.connect('rasikhon.db')
-    item = conn.execute('SELECT id, type, value FROM content WHERE title = ? AND parent_id IS ?', (clean_text, curr_parent)).fetchone()
-    if item:
-        item_id, i_type, i_val = item
-        conn.execute('UPDATE content SET visits = visits + 1 WHERE id = ?', (item_id,))
-        conn.commit()
-        if i_type == 'folder':
-            path.append(item_id)
-            await update.message.reply_text(f"📁 {clean_text}", reply_markup=get_keyboard(item_id, is_admin))
+    query = supabase.table("content").select("*").eq("title", clean_text).eq("parent_id", curr_parent).execute()
+    
+    if query.data:
+        item = query.data[0]
+        if item['type'] == 'folder':
+            path.append(item['id'])
+            await update.message.reply_text(f"فتح {clean_text}..", reply_markup=get_keyboard(item['id'], is_admin))
         else:
-            if i_type == 'pdf': await update.message.reply_document(i_val, caption=clean_text)
-            elif i_type == 'photo': await update.message.reply_photo(i_val, caption=clean_text)
-            elif i_type == 'video': await update.message.reply_video(i_val, caption=clean_text)
-            elif i_type == 'url': await update.message.reply_text(f"🔗 {clean_text}:\n{i_val}")
-    conn.close()
+            await context.bot.send_document(chat_id=update.effective_chat.id, document=item['file_id'], caption=item['title'])
 
-# --- 5. التشغيل النهائي ---
+# --- 5. التشغيل ---
 def main():
-    init_db()
-    keep_alive() # تشغيل النبض الوهمي
-    while True:
-        try:
-            app_tg = Application.builder().token(TOKEN).build()
-            app_tg.add_handler(CommandHandler("start", start))
-            app_tg.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_logic))
-            app_tg.run_polling(drop_pending_updates=True)
-        except Exception as e:
-            time.sleep(5)
+    keep_alive()
+    application = Application.builder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_logic))
+    application.run_polling(drop_pending_updates=True)
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    main()

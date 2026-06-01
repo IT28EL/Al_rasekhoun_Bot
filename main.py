@@ -27,7 +27,7 @@ SUPABASE_URL = "https://dnjwfulyobufwdqezktd.supabase.co"
 SUPABASE_KEY = "sb_publishable_As6dVjy3l11aIB3zvMJbbQ_R4gqRmfr" # ملاحظة هامة بالأسفل
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-TOKEN = '8287845380:AAGvZgyCm0fgN1lFLmFzcTp-fdk5kuFSEGU'
+TOKEN = '8287845380:AAEALQaBW_wdQ72MSdtbbukwvP3YsXTbSkc'
 ADMIN_ID = 7833080290  # آيدي المسؤول
 FILES_CHANNEL_ID = -1004297648771  # آيدي قناتك الخاصة
 

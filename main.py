@@ -30,6 +30,7 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 TOKEN = '8287845380:AAEALQaBW_wdQ72MSdtbbukwvP3YsXTbSkc'
 ADMIN_ID = 7833080290 
 FILES_CHANNEL_ID = -1004297648771  # آيدي قناتك الخاصة
+
 # --- 3. الحماية من السبام ---
 user_last_action = {}
 def is_spamming(user_id):
@@ -81,18 +82,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def handle_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-elif update.message.document or update.message.photo or update.message.video:
-            # السطر الجديد: توجيه الملف للقناة الخاصة لحفظ نسخة هناك
-            await update.message.forward(chat_id=FILES_CHANNEL_ID)
-            
-            # جلب الـ ID لتخزينه سحابياً
-            f_id = update.message.document.file_id if update.message.document else (update.message.video.file_id if update.message.video else update.message.photo[-1].file_id)
-            title = update.message.caption or "ملف بدون عنوان"
-            
-            # حفظ البيانات في السحاب
-            supabase.table("content").insert({"parent_id": curr_parent, "title": title, "type": "file", "file_id": f_id}).execute()
-            await update.message.reply_text("✅ تم حفظ الملف سحابياً وتوجيهه للقناة.")
-            context.user_data['mode'] = None
+    user_id = update.effective_user.id
+    text = update.message.text
+    if is_spamming(user_id): return
+    
+    is_admin = (user_id == ADMIN_ID)
+    path = context.user_data.get('path', [])
+    curr_parent = path[-1] if path else 0
 
     # --- ميزة الإحصائيات ---
     if is_admin and text == "📊 الإحصائيات":
@@ -132,7 +128,7 @@ elif update.message.document or update.message.photo or update.message.video:
         await update.message.reply_text("القائمة الرئيسية", reply_markup=get_main_keyboard(None, is_admin))
         return
 
-    # --- إضافة المحتوى (سحابي) ---
+    # --- إضافة المحتوى (سحابي + توجيه للقناة) ---
     if is_admin and text == "➕ إضافة محتوى":
         await update.message.reply_text("أرسل: `قسم | الاسم` أو `رابط | الاسم | الرابط` أو أرسل ملفاً.")
         context.user_data['mode'] = 'adding'
@@ -149,31 +145,34 @@ elif update.message.document or update.message.photo or update.message.video:
             await update.message.reply_text("✅ تم الحفظ سحابياً.")
             context.user_data['mode'] = None
         elif update.message.document or update.message.photo or update.message.video:
+            # توجيه للقناة الخاصة
+            await update.message.forward(chat_id=FILES_CHANNEL_ID)
+            
             f_id = update.message.document.file_id if update.message.document else (update.message.video.file_id if update.message.video else update.message.photo[-1].file_id)
             title = update.message.caption or "ملف بدون عنوان"
             supabase.table("content").insert({"parent_id": curr_parent, "title": title, "type": "file", "file_id": f_id}).execute()
-            await update.message.reply_text("✅ تم حفظ الملف.")
+            await update.message.reply_text("✅ تم حفظ الملف سحابياً وتوجيهه للقناة.")
             context.user_data['mode'] = None
         return
 
     # --- التصفح والزيارات ---
-    clean_text = text.replace("📁 ", "").replace("📍 ", "")
-    query = supabase.table("content").select("*").eq("title", clean_text).eq("parent_id", curr_parent).execute()
-    
-    if query.data:
-        item = query.data[0]
-        # تحديث عداد الزيارات
-        new_visits = (item.get('visits', 0) or 0) + 1
-        supabase.table("content").update({"visits": new_visits}).eq("id", item['id']).execute()
+    if text:
+        clean_text = text.replace("📁 ", "").replace("📍 ", "")
+        query = supabase.table("content").select("*").eq("title", clean_text).eq("parent_id", curr_parent).execute()
         
-        if item['type'] == 'folder':
-            path.append(item['id'])
-            await update.message.reply_text(f"📁 {clean_text}", reply_markup=get_main_keyboard(item['id'], is_admin))
-        else:
-            if item['type'] == 'url':
-                await update.message.reply_text(f"🔗 {item['title']}:\n{item['file_id']}")
+        if query.data:
+            item = query.data[0]
+            new_visits = (item.get('visits', 0) or 0) + 1
+            supabase.table("content").update({"visits": new_visits}).eq("id", item['id']).execute()
+            
+            if item['type'] == 'folder':
+                path.append(item['id'])
+                await update.message.reply_text(f"📁 {clean_text}", reply_markup=get_main_keyboard(item['id'], is_admin))
             else:
-                await context.bot.send_document(chat_id=user_id, document=item['file_id'], caption=item['title'])
+                if item['type'] == 'url':
+                    await update.message.reply_text(f"🔗 {item['title']}:\n{item['file_id']}")
+                else:
+                    await context.bot.send_document(chat_id=user_id, document=item['file_id'], caption=item['title'])
 
 # --- 6. التشغيل ---
 def main():
